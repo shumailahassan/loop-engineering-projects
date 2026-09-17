@@ -1,0 +1,7 @@
+.git-old/
+**/.git-old/
+**/fix-worktree-backup/
+__pycache__/
+*.pyc
+
+**/.claude/scheduled_tasks.lock
