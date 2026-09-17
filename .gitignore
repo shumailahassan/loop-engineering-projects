@@ -5,3 +5,7 @@ __pycache__/
 *.pyc
 
 **/.claude/scheduled_tasks.lock
+
+01-a-watch-loop/loop_stop.txt
+01-a-watch-loop/task.log
+01-a-watch-loop/task_done.txt
