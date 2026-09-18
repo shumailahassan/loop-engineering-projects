@@ -1,0 +1,129 @@
+name: Doorbell Loop - PR Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  groq-review:
+    runs-on: ubuntu-latest
+    name: Run Groq Code Review
+
+    steps:
+      - name: Checkout PR code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get PR diff
+        run: |
+          git diff "${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}" > /tmp/pr.diff
+          echo "Diff size: $(wc -c < /tmp/pr.diff) bytes"
+
+      - name: Call Groq API for code review
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+        run: |
+          cat > /tmp/review_prompt.txt <<'EOF'
+          You are a code reviewer. Analyze the following pull request diff.
+
+          Review the complete pull request diff and look for intentionally planted or newly introduced bugs.
+
+          Pay particular attention to the known planted bug in the test, such as an off-by-one error or a deleted null check.
+
+          If you identify bugs:
+          - Specify the file name and line number
+          - Describe the exact problem
+          - Suggest the fix
+          - Rate confidence: HIGH (definite bug) or LOW (suspected bug).
+
+          If no bug is found:
+          - Explain why the PR appears bug-free
+          - Describe what you examined
+
+          Do not modify files.
+          Do not approve or merge the PR.
+
+          Return only the review text. Do not use Markdown code fences.
+          EOF
+
+          python3 - <<'PY'
+          import json
+
+          with open("/tmp/review_prompt.txt", "r", encoding="utf-8") as f:
+              prompt = f.read()
+
+          with open("/tmp/pr.diff", "r", encoding="utf-8", errors="replace") as f:
+              diff = f.read()
+
+          payload = {
+              "model": "openai/gpt-oss-20b",
+              "messages": [
+                  {
+                      "role": "user",
+                      "content": prompt + "\n\nPULL REQUEST DIFF:\n\n" + diff
+                  }
+              ],
+              "max_completion_tokens": 2048
+          }
+
+          with open("/tmp/payload.json", "w", encoding="utf-8") as f:
+              json.dump(payload, f)
+          PY
+
+          curl --fail-with-body -sS \
+            -X POST "https://api.groq.com/openai/v1/chat/completions" \
+            -H "Authorization: Bearer ${GROQ_API_KEY}" \
+            -H "Content-Type: application/json" \
+            --data-binary @/tmp/payload.json \
+            > /tmp/review_response.json
+
+          python3 - <<'PY'
+          import json
+          import sys
+
+          with open("/tmp/review_response.json", "r", encoding="utf-8") as f:
+              data = json.load(f)
+
+          if "error" in data:
+              print("Groq API error:", data["error"], file=sys.stderr)
+              sys.exit(1)
+
+          review = data["choices"][0]["message"]["content"]
+
+          with open("/tmp/review_output.txt", "w", encoding="utf-8") as f:
+              f.write(review)
+          PY
+
+          echo "Groq review completed."
+
+      - name: Post review as PR comment
+        if: success()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const review = fs.readFileSync('/tmp/review_output.txt', 'utf8');
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              body: '## 🔔 Doorbell Loop - Automated Code Review\n\n' + review
+            });
+
+      - name: Handle review errors
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              body: '## ⚠️ Doorbell Loop - Review Failed\n\nThe automated code review could not be completed. Please check the GitHub Actions logs and verify that the `GROQ_API_KEY` secret is configured.'
+            });
